@@ -1,3 +1,4 @@
+import getpass
 import logging
 from abc import ABC, abstractmethod
 from datetime import date, datetime
@@ -7,12 +8,20 @@ from dominio.empleado import Empleado
 from dominio.excepciones import ErrorDeDominio
 from dominio.proyecto import Proyecto
 from dominio.registro_tiempo import RegistroTiempo
-from dominio.validaciones import validar_dias, validar_horas, validar_rut, validar_sueldo
+from dominio.validaciones import (validar_ciudad, validar_dias, validar_horas, validar_moneda,
+                                  validar_rut, validar_sueldo)
 from repositorio.conexion import ErrorDeConexion, inicializar_bd, probar_conexion
+from repositorio.externos_repo import IndicadorRepositorio, LecturaClimaRepositorio
+from repositorio.usuario_repo import UsuarioRepositorio
 from repositorio.departamento_repo import DepartamentoRepositorio
 from repositorio.empleado_repo import EmpleadoRepositorio
 from repositorio.proyecto_repo import ProyectoRepositorio
 from repositorio.registro_tiempo_repo import RegistroTiempoRepositorio
+from servicios.autenticacion import (CredencialesInvalidas, CuentaBloqueada, ServicioAutenticacion,
+                                     SesionNoValida)
+from servicios.externos import ServicioClima, ServicioIndicadores, crear_clientes_desde_entorno
+
+log = logging.getLogger(__name__)
 
 
 def pedir(mensaje, convertir=str, actual=None, opcional=False):
@@ -89,6 +98,7 @@ def a_dias(texto):
 class Menu(ABC):
     titulo = "Menú"
     salida = "Volver"
+    _sesion = None          # MenuPrincipal la asigna después del login
 
     @abstractmethod
     def opciones(self):
@@ -111,11 +121,20 @@ class Menu(ABC):
 
     def _ejecutar(self, accion):
         try:
+            if self._sesion is None:
+                raise SesionNoValida("Debes iniciar sesión.")
+            self._sesion.exigir()           # toda acción del sistema requiere sesión activa
             accion()
+        except SesionNoValida:
+            raise                           # sube hasta main(), que vuelve a pedir login
         except ErrorDeDominio as e:
             print(f"  ✘ {e}")
         except ErrorDeConexion as e:
             print(f"  ✘ {e}")
+        except Exception:
+            # Última barrera: el programa no se cae y el usuario no ve la traza técnica.
+            log.exception("Error inesperado en el menú '%s'", self.titulo)
+            print("  ✘ Ocurrió un error inesperado. El detalle quedó registrado en ecotech.log.")
 
 
 class MenuCatalogo(Menu):
@@ -271,27 +290,154 @@ class MenuRegistros(Menu):
         print("  ✔ Eliminado." if self._repo.eliminar(id_) else "  ✘ No existe ese registro.")
 
 
+def mostrar_resultado(resultado):
+    """Muestra un dato externo; si viene del Plan B lo dice claramente, con su antigüedad."""
+    if resultado.desde_respaldo:
+        obtenido = resultado.dato.obtenido_en.strftime("%d-%m-%Y %H:%M")
+        print(f"  ⚠ {resultado.motivo}.")
+        print(f"  ⚠ Mostrando el último dato guardado (obtenido_en {obtenido}, "
+              f"{resultado.antiguedad()}).")
+    print(f"  {resultado.dato}")
+
+
+class MenuServiciosExternos(Menu):
+    titulo = "Servicios externos (clima e indicadores)"
+
+    def __init__(self, servicio_clima, servicio_indicadores, repo_empleados, repo_proyectos,
+                 repo_clima, repo_indicadores):
+        self._clima = servicio_clima
+        self._indicadores = servicio_indicadores
+        self._repo_emp = repo_empleados
+        self._repo_pro = repo_proyectos
+        self._repo_clima = repo_clima
+        self._repo_ind = repo_indicadores
+
+    def opciones(self):
+        return [("Clima para planificar un proyecto", self.clima_proyecto),
+                ("Tipo de cambio (dólar / euro)", self.tipo_cambio),
+                ("Calcular pago internacional de un empleado", self.pago_internacional),
+                ("Ver datos guardados (respaldo local)", self.datos_guardados)]
+
+    def clima_proyecto(self):
+        print("Proyectos:")
+        mostrar_lista(self._repo_pro.listar())
+        id_proyecto = pedir("Id del proyecto (Enter para omitir)", a_entero, opcional=True)
+        proyecto = self._repo_pro.obtener(id_proyecto) if id_proyecto else None
+        if id_proyecto and proyecto is None:
+            print("  ✘ No existe ese proyecto; se consulta solo el clima.")
+        ciudad = pedir("Ciudad donde se ejecuta", validar_ciudad)
+        print("  Consultando el servicio de clima...")
+        resultado = self._clima.consultar(ciudad)
+        mostrar_resultado(resultado)
+        nivel, recomendacion = resultado.dato.evaluar_riesgo()
+        destino = f"Proyecto {proyecto.nombre}" if proyecto else "Recomendación"
+        print(f"  {destino} · riesgo {nivel}: {recomendacion}.")
+
+    def tipo_cambio(self):
+        moneda = pedir(f"Moneda ({' / '.join(ServicioIndicadores.monedas())})", validar_moneda)
+        print("  Consultando indicadores económicos...")
+        mostrar_resultado(self._indicadores.consultar(moneda))
+
+    def pago_internacional(self):
+        empleado = self._repo_emp.obtener(pedir("RUT del empleado", validar_rut))
+        if empleado is None:
+            print("  ✘ No hay un empleado con ese RUT.")
+            return
+        dias = pedir("Días trabajados en el mes (0 a 30)", a_dias)
+        moneda = pedir(f"Moneda de pago ({' / '.join(ServicioIndicadores.monedas())})",
+                       validar_moneda)
+        print("  Consultando tipo de cambio...")
+        resultado = self._indicadores.consultar(moneda)
+        mostrar_resultado(resultado)
+        sueldo_clp = empleado.calcular_sueldo_proporcional(dias)
+        monto = resultado.dato.convertir_desde_pesos(sueldo_clp)
+        sigla = ServicioIndicadores.monedas()[resultado.dato.codigo]
+        clp = f"{sueldo_clp:,}".replace(",", ".")           # formato chileno: 1.200.000
+        print(f"  {empleado.nombre}: ${clp} CLP ({dias} días) = {monto:,.2f} {sigla}")
+        if resultado.desde_respaldo:
+            print("  ⚠ Monto referencial: el tipo de cambio no está actualizado.")
+
+    def datos_guardados(self):
+        print(f"Lecturas de clima guardadas: {self._repo_clima.contar()}")
+        mostrar_lista(self._repo_clima.listar_recientes(5))
+        print(f"Valores de moneda guardados: {self._repo_ind.contar()}")
+        mostrar_lista(self._repo_ind.listar_recientes(5))
+
+
 class MenuPrincipal(Menu):
     titulo = "EcoTech Solutions · Gestión interna"
     salida = "Salir"
 
-    def __init__(self):
+    def __init__(self, sesion, autenticacion, clientes_api):
+        self._sesion = sesion
+        self._auth = autenticacion
         repo_dep = DepartamentoRepositorio()
         repo_pro = ProyectoRepositorio()
+        repo_emp = EmpleadoRepositorio()
+        repo_clima = LecturaClimaRepositorio()
+        repo_ind = IndicadorRepositorio()
         self._submenus = [
-            MenuEmpleados(EmpleadoRepositorio(), repo_dep),
+            MenuEmpleados(repo_emp, repo_dep),
             MenuCatalogo("Departamentos", Departamento, repo_dep),
             MenuCatalogo("Proyectos", Proyecto, repo_pro),
             MenuRegistros(RegistroTiempoRepositorio(), repo_pro),
+            MenuServiciosExternos(
+                ServicioClima(sesion, clientes_api["geocoding"], clientes_api["clima"], repo_clima),
+                ServicioIndicadores(sesion, clientes_api["indicadores"], repo_ind),
+                repo_emp, repo_pro, repo_clima, repo_ind),
         ]
+        for submenu in self._submenus:
+            submenu._sesion = sesion
 
     def opciones(self):
-        return [(submenu.titulo, submenu.mostrar) for submenu in self._submenus]
+        opciones = [(submenu.titulo, submenu.mostrar) for submenu in self._submenus]
+        opciones.append(("Crear otro usuario del sistema", self.crear_usuario))
+        return opciones
+
+    def crear_usuario(self):
+        crear_usuario_interactivo(self._auth)
+
+
+def crear_usuario_interactivo(autenticacion):
+    print("La contraseña debe tener al menos 8 caracteres y combinar letras y números.")
+    while True:
+        usuario = input("Nuevo usuario: ").strip()
+        clave = getpass.getpass("Contraseña (no se muestra al escribir): ")
+        if clave != getpass.getpass("Repite la contraseña: "):
+            print("  ✘ Las contraseñas no coinciden.")
+            continue
+        try:
+            nombre = autenticacion.registrar(usuario, clave)
+        except ErrorDeDominio as e:
+            print(f"  ✘ {e}")
+            continue
+        print(f"  ✔ Usuario '{nombre}' creado.")
+        return
+
+
+def pantalla_acceso(autenticacion, max_intentos=3):
+    """Devuelve una Sesion si el login es correcto, o None tras agotar los intentos."""
+    if not autenticacion.hay_usuarios():
+        print("\nPrimera ejecución: crea el usuario administrador.")
+        crear_usuario_interactivo(autenticacion)
+    print("\n=== Inicio de sesión ===")
+    for _ in range(max_intentos):
+        usuario = input("Usuario: ").strip()
+        clave = getpass.getpass("Contraseña: ")
+        try:
+            sesion = autenticacion.iniciar_sesion(usuario, clave)
+        except (CredencialesInvalidas, CuentaBloqueada) as e:
+            print(f"  ✘ {e}")
+            continue
+        print(f"  ✔ Bienvenido/a, {sesion.usuario}.")
+        return sesion
+    print("Demasiados intentos fallidos.")
+    return None
 
 
 def main():
-    logging.basicConfig(filename="ecotech.log", level=logging.ERROR,
-                        format="%(asctime)s %(levelname)s %(message)s")
+    logging.basicConfig(filename="ecotech.log", level=logging.WARNING,
+                        format="%(asctime)s %(levelname)s %(name)s %(message)s")
     try:
         version, _ = probar_conexion()
         inicializar_bd()
@@ -299,8 +445,21 @@ def main():
         print(f"No se pudo iniciar la aplicación: {e}")
         return
     print(f"Conectado a SQLite {version}")
+    autenticacion = ServicioAutenticacion(UsuarioRepositorio())
+    clientes_api = crear_clientes_desde_entorno()
     try:
-        MenuPrincipal().mostrar()
+        while True:
+            sesion = pantalla_acceso(autenticacion)
+            if sesion is None:
+                break
+            try:
+                MenuPrincipal(sesion, autenticacion, clientes_api).mostrar()
+                sesion.cerrar()
+                break
+            except SesionNoValida as e:
+                print(f"\n  ✘ {e}")
+    except ErrorDeConexion as e:
+        print(f"  ✘ {e}")
     except (KeyboardInterrupt, EOFError):
         print()
     print("Hasta luego.")

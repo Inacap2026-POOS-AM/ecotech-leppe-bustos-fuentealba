@@ -1,0 +1,13 @@
+# Entorno y secretos
+.env
+.venv/
+
+# Base de datos local
+*.db
+
+# Python
+__pycache__/
+*.pyc
+
+# Registro de errores
+*.log

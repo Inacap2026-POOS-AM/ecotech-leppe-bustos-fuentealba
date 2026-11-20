@@ -1,3 +1,5 @@
+import re
+import unicodedata
 from datetime import date
 
 from dominio.excepciones import DatoInvalido
@@ -67,3 +69,61 @@ def validar_rut(rut):
     if calcular_dv(numero) != dv:
         raise DatoInvalido("El dígito verificador del RUT no es correcto")
     return rut
+
+
+# ===================== Unidad 3 (ES3) =====================
+# Letras (con tildes y ñ), espacios, guion, apóstrofo y punto. Nada de <>;"%&/=\.
+_PATRON_CIUDAD = re.compile(r"^[A-Za-zÁÉÍÓÚÜÑáéíóúüñ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ .'\-]{1,59}$")
+_PATRON_USUARIO = re.compile(r"^[a-z0-9_.]{3,30}$")
+MONEDAS_PERMITIDAS = {"dolar": "USD", "euro": "EUR"}   # lista blanca de indicadores
+
+
+def normalizar_texto(texto):
+    """'  Concepción ' -> 'concepcion': sin tildes, minúsculas y espacios simples."""
+    sin_tildes = unicodedata.normalize("NFKD", texto)
+    sin_tildes = "".join(c for c in sin_tildes if not unicodedata.combining(c))
+    return " ".join(sin_tildes.lower().split())
+
+
+def validar_ciudad(valor):
+    if not isinstance(valor, str):
+        raise DatoInvalido("La ciudad debe ser texto")
+    ciudad = " ".join(valor.split())
+    if not _PATRON_CIUDAD.fullmatch(ciudad):
+        raise DatoInvalido("La ciudad debe tener entre 2 y 60 letras (se permiten espacios, "
+                           "guiones y tildes, sin números ni símbolos)")
+    return ciudad
+
+
+def validar_moneda(valor):
+    if not isinstance(valor, str):
+        raise DatoInvalido("La moneda debe ser texto")
+    codigo = normalizar_texto(valor)
+    if codigo not in MONEDAS_PERMITIDAS:
+        raise DatoInvalido(f"Moneda no soportada. Opciones: {', '.join(MONEDAS_PERMITIDAS)}")
+    return codigo
+
+
+def validar_nombre_usuario(valor):
+    if not isinstance(valor, str):
+        raise DatoInvalido("El usuario debe ser texto")
+    usuario = valor.strip().lower()
+    if not _PATRON_USUARIO.fullmatch(usuario):
+        raise DatoInvalido("El usuario debe tener de 3 a 30 caracteres: letras sin tilde, "
+                           "números, punto o guion bajo")
+    return usuario
+
+
+def validar_password_nueva(valor):
+    """Política mínima. bcrypt solo considera 72 bytes: se rechaza lo que exceda."""
+    if not isinstance(valor, str) or valor == "":
+        raise DatoInvalido("La contraseña no puede estar vacía")
+    if valor != valor.strip():
+        raise DatoInvalido("La contraseña no puede empezar ni terminar con espacios")
+    if len(valor) < 8:
+        raise DatoInvalido("La contraseña debe tener al menos 8 caracteres")
+    if len(valor.encode("utf-8")) > 72:
+        raise DatoInvalido("La contraseña es demasiado larga (máximo 72 bytes)")
+    if not re.search(r"[A-Za-z]", valor) or not re.search(r"\d", valor):
+        raise DatoInvalido("La contraseña debe combinar letras y números")
+    return valor
