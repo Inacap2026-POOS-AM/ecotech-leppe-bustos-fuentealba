@@ -89,7 +89,7 @@ Estos casos ocurrieron en esta entrega: la IA generó una versión, la revisión
 |---|---|---|
 | **Ejecución consecutiva** | Ejecutar `python main.py` dos veces y consultar la misma ciudad o moneda. Luego, en *Servicios externos → Ver datos guardados*, mirar el total. | El total **no aumenta** por repetir la consulta (upsert sobre `UNIQUE`). Ojo: Open-Meteo publica una medición nueva cada 15 minutos; si pasan más de 15 minutos entre una consulta y otra, se agrega una fila porque es una medición distinta, no un duplicado. |
 | **Corte de red** | Desconectar el WiFi y consultar el clima o el dólar. | 3 intentos con espera creciente (unos 4 s) y luego: *"⚠ No hay conexión con el servicio. Mostrando el último dato guardado (obtenido_en …, hace …)"*. Sin trazas de error. |
-| **URL inválida** | En `.env` poner `API_INDICADORES_URL=https://mindicador.cl/api/no-existe` y consultar el dólar. | HTTP 404, **sin reintentos** (es un error 4xx) y Plan B con el motivo *"El servicio no encontró el recurso solicitado (HTTP 404)"*. |
+| **URL inválida** | En `.env` poner `API_CLIMA_URL=https://api.open-meteo.com/v1/no-existe` y consultar el clima.. | HTTP 404, **sin reintentos** (es un error 4xx) y Plan B con el motivo *"El servicio no encontró el recurso solicitado (HTTP 404)"*. |
 | **Tabla de usuarios** | `python -c "import sqlite3; print(sqlite3.connect('ecotech.db').execute('SELECT nombre_usuario, hash_password FROM usuario').fetchall())"` (o abrir `ecotech.db` con DB Browser for SQLite) | Solo hashes `$2b$12$...`, ninguna contraseña legible. |
 
 ---
